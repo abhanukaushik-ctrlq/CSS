@@ -1,0 +1,23 @@
+#item-1{
+    background-color: orange;
+    height:200px;
+    width: 200px;
+    padding: 20px;
+    margin: 40;
+}
+#item-2{
+    background-color: gold;
+    height: 200px;
+    width: 200px;
+    padding: 30px;
+    margin: 20px;
+    border-style: dotted;
+    border-width: 15px;
+    border-color: purple;
+}
+#item-3{
+    background-color: green;
+    height: 200px;
+    width: 200px;
+    margin: 10px;
+}

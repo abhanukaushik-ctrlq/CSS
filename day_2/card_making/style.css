@@ -1,0 +1,13 @@
+#item-1{
+    background-color: aqua;
+    height: 200px;
+    width: 600px;
+    
+
+}
+p{
+    border-width: 5px;
+    border-color: black;
+    border-style: solid;
+    border-radius: 30px;
+}

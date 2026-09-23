@@ -1,0 +1,9 @@
+div{
+    background-color: hsl(210, 93%, 49%);
+}
+p{
+    background-color: blanchedalmond;
+}
+span{
+    background-color:color-mix(in hsl shorter hue, color percentage, color percentage)
+}
