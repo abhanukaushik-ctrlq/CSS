@@ -1,23 +1,22 @@
 #item-1{
     background-color: orange;
-    height:200px;
-    width: 200px;
+    height:20cqw;
+    width: 98px;
     padding: 20px;
     margin: 40;
 }
 #item-2{
     background-color: gold;
     height: 200px;
-    width: 200px;
-    padding: 30px;
-    margin: 20px;
-    border-style: dotted;
+    width: 300px;
     border-width: 15px;
     border-color: purple;
 }
 #item-3{
     background-color: green;
     height: 200px;
-    width: 200px;
-    margin: 10px;
+    width: 90%;
+}
+body{
+    width: 900px;
 }
