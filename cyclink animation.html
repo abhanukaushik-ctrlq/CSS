@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Infinite Ride — Vector Sunset</title>
+<style>
+  html,body{margin:0;padding:0;height:100%;overflow:hidden;background:#1a1a2e;}
+  canvas{display:block;width:100vw;height:100vh;}
+  .hud{
+    position:fixed;left:18px;bottom:16px;
+    font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;
+    letter-spacing:.22em;text-transform:uppercase;
+    color:rgba(255,255,255,.35);pointer-events:none;user-select:none;
+    text-shadow:0 1px 3px rgba(0,0,0,.5);
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud">Vector Sunset</div>
+<script>
+(function(){
+'use strict';
+
+/* ══════════════════════════════════════════════════════════════
+   CANVAS SETUP
+   ══════════════════════════════════════════════════════════════ */
+const cvs = document.getElementById('c');
+const ctx = cvs.getContext('2d', { alpha:false });
+
+/* ══════════════════════════════════════════════════════════════
+   MATH HELPERS
+   ══════════════════════════════════════════════════════════════ */
+const clamp = (v,a,b)=> v<a?a:(v>b?b:v);
+const lerp  = (a,b,t)=> a+(b-a)*t;
+const smoothstep = (e0,e1,x)=>{ const t=clamp((x-e0)/(e1-e0),0,1); return t*t*(3-2*t); };
+
+/* Two-bone inverse kinematics */
+function ik(ax,ay,bx,by,l1,l2,sign){
+  const dx=bx-ax, dy=by-ay;
+  let d = Math.sqrt(dx*dx+dy*dy);
+  if (d < 0.0001) d = 0.0001;
+  const ux=dx/d, uy=dy/d;
+  const dc = clamp(d, Math.abs(l1-l2)+0.01, l1+l2-0.01);
+  const a  = (l1*l1 - l2*l2 + dc*dc)/(2*dc);
+  const h  = Math.sqrt(Math.max(0, l1*l1 - a*a));
+  return { x: ax + ux*a - uy*h*sign, y: ay + uy*a + ux*h*sign };
+}
+
+/* ══════════════════════════════════════════════════════════════
+   STATE & CONSTANTS
+   ══════════════════════════════════════════════════════════════ */
+let W=0,H=0,DPR=1,S=1,G=0,cx=0,horizonY=0;
+let clouds=[], grass=[], roadDashes=[];
+
+const SPEED      = 480;     // world pixels per second
+const CRANK_RATE = 5.5;     // crank rad/sec
+const R          = 68;      // wheel radius
+const CRANK      = 30;      // crank arm length
+
+let scroll=0, wheelAngle=0, crankAngle=0, lastTime=0;
+
+/* Bicycle & Rider Geometry (origin = ground, under the bike) */
+const BB      = { x:-25,  y:-54  };   // bottom bracket
+const REAR_W  = { x:-100, y:-R   };   // rear wheel
+const FRONT_W = { x: 100, y:-R   };   // front wheel
+const SEAT    = { x:-72,  y:-188 };   // seat clamp
+const HEAD_T  = { x: 62,  y:-190 };   // head tube top
+const HEAD_B  = { x: 70,  y:-142 };   // head tube bottom
+const HIP     = { x:-70,  y:-193 };
+const SHOULDER= { x: -5,  y:-285 };   // Aggressive tuck posture
+const HAND    = { x: 92,  y:-195 };
+const HEAD_C  = { x: 15,  y:-325 };
+
+const THIGH = 92, SHIN = 88;
+const UPPER_ARM = 64, FOREARM = 58;
+const CHAINRING = 22, COG = 9;
+
+/* ══════════════════════════════════════════════════════════════
+   RESIZE & PARTICLES
+   ══════════════════════════════════════════════════════════════ */
+function resize(){
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = window.innerWidth;
+  H = window.innerHeight;
+  cvs.width  = Math.floor(W*DPR);
+  cvs.height = Math.floor(H*DPR);
+  cvs.style.width  = W+'px';
+  cvs.style.height = H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+
+  G        = H*0.78;
+  cx       = W*0.5;
+  S        = clamp(Math.min(W/1150, H/720), 0.40, 2.0);
+  horizonY = G - 165*S;
+
+  // Soft background clouds
+  clouds = [];
+  for(let i=0;i<6;i++){
+    clouds.push({
+      x: Math.random()*W,
+      y: Math.random()*horizonY*0.6 + 20,
+      w: 120 + Math.random()*180,
+      h: 20 + Math.random()*25,
+      a: 0.05 + Math.random()*0.08,
+      sp: 0.1 + Math.random()*0.2
+    });
+  }
+
+  // Roadside grass
+  grass = [];
+  for(let i=0;i<300;i++){
+    grass.push({
+      x: Math.random()*2600,
+      h: 8 + Math.random()*18,
+      w: 2 + Math.random()*3
+    });
+  }
+
+  // Road dashes
+  roadDashes = [];
+  for(let i=0;i<40;i++){
+    roadDashes.push({ x: i*120 });
+  }
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ENVIRONMENT DRAWING
+   ══════════════════════════════════════════════════════════════ */
+function ridgeAt(wx, seed, f){
+  const v = 0.5
+    + 0.26*Math.sin(wx*f        + seed)
+    + 0.16*Math.sin(wx*f*2.31   + seed*2.1)
+    + 0.09*Math.sin(wx*f*5.13   + seed*3.7)
+    + 0.05*Math.sin(wx*f*11.31  + seed*5.3);
+  return clamp(v, 0.02, 1);
+}
+
+function drawRidge(offset, baseY, amp, color, seed, f){
+  ctx.beginPath();
+  ctx.moveTo(-30, baseY + 900);
+  for (let x=-30; x<=W+30; x+=5){
+    const wx = x + offset;
+    ctx.lineTo(x, baseY - ridgeAt(wx, seed, f)*amp);
+  }
+  ctx.lineTo(W+30, baseY + 900);
+  ctx.closePath();
+  ctx.fillStyle = color;
+  ctx.fill();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   BICYCLE & RIDER (Flat Vector Style)
+   ══════════════════════════════════════════════════════════════ */
+
+function drawWheel(x, y, ang){
+  // Tire
+  ctx.strokeStyle = '#1a1a1a';
+  ctx.lineWidth = 9;
+  ctx.beginPath(); ctx.arc(x,y,R,0,Math.PI*2); ctx.stroke();
+
+  // Rim
+  ctx.strokeStyle = '#e2e8f0';
+  ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(x,y,R-6,0,Math.PI*2); ctx.stroke();
+
+  // Minimal spokes (4 cross)
+  ctx.strokeStyle = '#e2e8f0';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  for (let i=0;i<4;i++){
+    const a = ang + i*(Math.PI/4);
+    ctx.moveTo(x + Math.cos(a)*(R-7), y + Math.sin(a)*(R-7));
+    ctx.lineTo(x - Math.cos(a)*(R-7), y - Math.sin(a)*(R-7));
+  }
+  ctx.stroke();
+
+  // Hub
+  ctx.fillStyle = '#e2e8f0';
+  ctx.beginPath(); ctx.arc(x,y,4,0,Math.PI*2); ctx.fill();
+}
+
+function drawLeg(theta, near){
+  const px = BB.x + CRANK*Math.cos(theta);
+  const py = BB.y + CRANK*Math.sin(theta);
+  const ankle = { x: px - 8, y: py - 15 };
+  const knee  = ik(HIP.x, HIP.y, ankle.x, ankle.y, THIGH, SHIN, -1);
+
+  ctx.lineCap = 'round';
+
+  // Crank arm
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.moveTo(BB.x,BB.y); ctx.lineTo(px,py); ctx.stroke();
+
+  // Pedal
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(px-8, py-2); ctx.lineTo(px+8, py-2); ctx.stroke();
+
+  // Thigh (Shorts)
+  ctx.strokeStyle = near ? '#1e293b' : '#0f172a';
+  ctx.lineWidth = 22;
+  ctx.beginPath(); ctx.moveTo(HIP.x,HIP.y); ctx.lineTo(knee.x,knee.y); ctx.stroke();
+
+  // Shin (Skin)
+  ctx.strokeStyle = near ? '#f0c39b' : '#d1a07a';
+  ctx.lineWidth = 14;
+  ctx.beginPath(); ctx.moveTo(knee.x,knee.y); ctx.lineTo(ankle.x,ankle.y); ctx.stroke();
+
+  // Sock
+  ctx.strokeStyle = '#f8fafc';
+  ctx.lineWidth = 13;
+  ctx.beginPath();
+  ctx.moveTo(lerp(knee.x,ankle.x,0.86), lerp(knee.y,ankle.y,0.86));
+  ctx.lineTo(ankle.x, ankle.y);
+  ctx.stroke();
+
+  // Shoe
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 12;
+  ctx.beginPath();
+  ctx.moveTo(ankle.x, ankle.y);
+  ctx.lineTo(px + 12, py - 3);
+  ctx.stroke();
+}
+
+function drawArm(sh, hd, near){
+  const elbow = ik(sh.x, sh.y, hd.x, hd.y, UPPER_ARM, FOREARM, 1);
+  ctx.lineCap = 'round';
+
+  // Upper arm (Jersey)
+  ctx.strokeStyle = near ? '#0d9488' : '#0f766e';
+  ctx.lineWidth = 16;
+  ctx.beginPath(); ctx.moveTo(sh.x,sh.y); ctx.lineTo(elbow.x,elbow.y); ctx.stroke();
+
+  // Forearm (Skin)
+  ctx.strokeStyle = near ? '#f0c39b' : '#d1a07a';
+  ctx.lineWidth = 12;
+  ctx.beginPath(); ctx.moveTo(elbow.x,elbow.y); ctx.lineTo(hd.x,hd.y); ctx.stroke();
+}
+
+function drawRider(){
+  ctx.save();
+  ctx.translate(cx, G);
+  ctx.scale(S, S);
+
+  const bob = Math.sin(crankAngle*2) * 1.5;
+  const sh = { x: SHOULDER.x, y: SHOULDER.y + bob };
+  const head = { x: HEAD_C.x, y: HEAD_C.y + bob };
+
+  /* --- Shadow --- */
+  ctx.save();
+  ctx.translate(0, 5);
+  ctx.scale(1, 0.08);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.beginPath(); ctx.arc(0,0,210,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+
+  /* --- Wheels --- */
+  drawWheel(REAR_W.x, REAR_W.y, wheelAngle);
+  drawWheel(FRONT_W.x, FRONT_W.y, wheelAngle);
+
+  /* --- Drivetrain --- */
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 2.5;
+  ctx.setLineDash([4,3]);
+  ctx.beginPath();
+  ctx.moveTo(BB.x, BB.y - CHAINRING); ctx.lineTo(REAR_W.x, REAR_W.y - COG);
+  ctx.moveTo(BB.x, BB.y + CHAINRING); ctx.lineTo(REAR_W.x, REAR_W.y + COG);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#cbd5e1';
+  ctx.lineWidth = 2.5;
+  ctx.beginPath(); ctx.arc(BB.x, BB.y, CHAINRING, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(REAR_W.x, REAR_W.y, COG, 0, Math.PI*2); ctx.stroke();
+
+  /* --- Far Leg --- */
+  drawLeg(crankAngle + Math.PI, false);
+
+  /* --- Frame --- */
+  const tube = (a,b,w)=>{
+    ctx.strokeStyle = '#cbd5e1';
+    ctx.lineWidth = w + 4;
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+    ctx.strokeStyle = '#f8fafc';
+    ctx.lineWidth = w;
+    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
+  };
+
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+
+  tube(BB, REAR_W,  6);
+  tube(SEAT, REAR_W, 5);
+  tube(BB, SEAT,    7);
+  tube(BB, HEAD_B,  8);
+  tube(SEAT, HEAD_T, 7);
+  tube(HEAD_T, HEAD_B, 10);
+  tube(HEAD_B, FRONT_W, 6);
+
+  // Bottom bracket
+  ctx.fillStyle = '#94a3b8';
+  ctx.beginPath(); ctx.arc(BB.x, BB.y, 8, 0, Math.PI*2); ctx.fill();
+
+  /* --- Far Arm --- */
+  drawArm(sh, { x: HAND.x - 5, y: HAND.y + 5 }, false);
+
+  /* --- Saddle & Seatpost --- */
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(SEAT.x, SEAT.y + 4); ctx.lineTo(SEAT.x + 2, SEAT.y - 8); ctx.stroke();
+
+  ctx.fillStyle = '#0f172a';
+  ctx.beginPath();
+  ctx.moveTo(SEAT.x - 20, SEAT.y - 6);
+  ctx.quadraticCurveTo(SEAT.x + 2, SEAT.y - 12, SEAT.x + 18, SEAT.y - 8);
+  ctx.quadraticCurveTo(SEAT.x + 6, SEAT.y - 3, SEAT.x - 20, SEAT.y - 1);
+  ctx.closePath();
+  ctx.fill();
+
+  /* --- Handlebars --- */
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(HEAD_T.x, HEAD_T.y);
+  ctx.lineTo(HEAD_T.x + 10, HEAD_T.y - 4);
+  ctx.stroke();
+
+  ctx.strokeStyle = '#0f172a';
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(HEAD_T.x + 8, HEAD_T.y - 5);
+  ctx.quadraticCurveTo(HEAD_T.x + 22, HEAD_T.y - 6, HEAD_T.x + 24, HEAD_T.y + 3);
+  ctx.quadraticCurveTo(HEAD_T.x + 26, HEAD_T.y + 10, HEAD_T.x + 18, HEAD_T.y + 12);
+  ctx.stroke();
+
+  /* --- Torso --- */
+  ctx.strokeStyle = '#0d9488';
+  ctx.lineWidth = 34;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(HIP.x, HIP.y);
+  ctx.quadraticCurveTo(lerp(HIP.x, sh.x, 0.45), lerp(HIP.y, sh.y, 0.55) + 4, sh.x, sh.y);
+  ctx.stroke();
+
+  // Jersey highlight
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.lineWidth = 8;
+  ctx.beginPath();
+  ctx.moveTo(HIP.x + 4, HIP.y - 10);
+  ctx.quadraticCurveTo(lerp(HIP.x, sh.x, 0.45) + 4, lerp(HIP.y, sh.y, 0.55) - 6, sh.x + 4, sh.y - 6);
+  ctx.stroke();
+
+  /* --- Neck --- */
+  ctx.strokeStyle = '#f0c39b';
+  ctx.lineWidth = 10;
+  ctx.beginPath();
+  ctx.moveTo(sh.x + 6, sh.y - 6);
+  ctx.lineTo(head.x - 4, head.y + 14);
+  ctx.stroke();
+
+  /* --- Head --- */
+  ctx.fillStyle = '#f0c39b';
+  ctx.beginPath();
+  ctx.ellipse(head.x, head.y, 14, 17, -0.18, 0, Math.PI*2);
+  ctx.fill();
+
+  // Sunglasses
+  ctx.fillStyle = '#0f172a';
+  ctx.beginPath();
+  ctx.ellipse(head.x + 7, head.y + 1.5, 8, 5.5, -0.18, 0, Math.PI*2);
+  ctx.fill();
+  ctx.fillStyle = 'rgba(120,200,255,0.3)';
+  ctx.beginPath();
+  ctx.ellipse(head.x + 8, head.y - 0.5, 4, 2, -0.2, 0, Math.PI*2);
+  ctx.fill();
+
+  /* --- Helmet --- */
+  ctx.fillStyle = '#f8fafc';
+  ctx.beginPath();
+  ctx.ellipse(head.x - 1, head.y - 4, 18, 17, -0.20, Math.PI*1.02, Math.PI*1.98);
+  ctx.closePath();
+  ctx.fill();
+
+  // Helmet vents
+  ctx.strokeStyle = '#94a3b8';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(head.x - 6, head.y - 18); ctx.lineTo(head.x - 4, head.y - 8);
+  ctx.moveTo(head.x + 2, head.y - 20); ctx.lineTo(head.x + 4, head.y - 9);
+  ctx.moveTo(head.x + 10, head.y - 17); ctx.lineTo(head.x + 11, head.y - 8);
+  ctx.stroke();
+
+  // Helmet brim
+  ctx.fillStyle = '#e2e8f0';
+  ctx.beginPath();
+  ctx.moveTo(head.x + 11, head.y - 11);
+  ctx.lineTo(head.x + 23, head.y - 6);
+  ctx.lineTo(head.x + 21, head.y - 1);
+  ctx.lineTo(head.x + 10, head.y - 5);
+  ctx.closePath();
+  ctx.fill();
+
+  /* --- Near Arm --- */
+  drawArm(sh, HAND, true);
+
+  /* --- Near Leg --- */
+  drawLeg(crankAngle, true);
+
+  ctx.restore();
+}
+
+/* ══════════════════════════════════════════════════════════════
+   MAIN DRAW LOOP
+   ══════════════════════════════════════════════════════════════ */
+function update(dt){
+  scroll      += SPEED * S * dt;
+  wheelAngle  += (SPEED / R) * dt;
+  crankAngle  += CRANK_RATE * dt;
+
+  // Clouds drift
+  for(let i=0;i<clouds.length;i++){
+    clouds[i].x -= clouds[i].sp * dt;
+    if(clouds[i].x + clouds[i].w < -50) clouds[i].x = W + clouds[i].w;
+  }
+}
+
+function draw(){
+  /* --- Sky Gradient --- */
+  const sg = ctx.createLinearGradient(0,0,0,horizonY+4);
+  sg.addColorStop(0,   '#2d1b4e'); // Deep purple
+  sg.addColorStop(0.4, '#6b3a6b'); // Mid violet
+  sg.addColorStop(0.7, '#c96b6b'); // Soft red/pink
+  sg.addColorStop(1,   '#f8a47a'); // Warm orange
+  ctx.fillStyle = sg;
+  ctx.fillRect(0,0,W,horizonY+4);
+
+  /* --- Clouds --- */
+  for(let i=0;i<clouds.length;i++){
+    const c = clouds[i];
+    ctx.fillStyle = 'rgba(255,255,255,' + c.a + ')';
+    ctx.beginPath();
+    ctx.ellipse(c.x, c.y, c.w, c.h, 0, 0, Math.PI*2);
+    ctx.fill();
+  }
+
+  /* --- Sun --- */
+  const sunX = W * 0.72;
+  const sunY = horizonY - 60 * S;
+  const sunR = 45 * S;
+
+  // Sun glow
+  const glow = ctx.createRadialGradient(sunX, sunY, 0, sunX, sunY, sunR*3);
+  glow.addColorStop(0,   'rgba(255,240,190,0.4)');
+  glow.addColorStop(0.5, 'rgba(255,200,130,0.15)');
+  glow.addColorStop(1,   'rgba(255,180,100,0)');
+  ctx.fillStyle = glow;
+  ctx.beginPath(); ctx.arc(sunX, sunY, sunR*3, 0, Math.PI*2); ctx.fill();
+
+  // Sun body
+  ctx.fillStyle = '#ffe8a1';
+  ctx.beginPath(); ctx.arc(sunX, sunY, sunR, 0, Math.PI*2); ctx.fill();
+
+  ctx.fillStyle = '#fffbe6';
+  ctx.beginPath(); ctx.arc(sunX - sunR*0.2, sunY - sunR*0.2, sunR*0.6, 0, Math.PI*2); ctx.fill();
+
+  /* --- Distant Mountains (Parallax) --- */
+  drawRidge(scroll*0.05, horizonY + 70*S,  220*S, '#5a4a7a', 1.7, 0.00062);
+  drawRidge(scroll*0.12, horizonY + 110*S, 160*S, '#7a5a8a', 4.3, 0.00125);
+  drawRidge(scroll*0.25, horizonY + 140*S, 110*S, '#a07a9a', 8.1, 0.00260);
+
+  /* --- Green Hills --- */
+  drawRidge(scroll*0.45, G - 2*S, 80*S, '#5a8a5a', 12.9, 0.00520);
+  drawRidge(scroll*0.60, G + 10*S, 50*S, '#4a7a4a', 18.2, 0.00820);
+
+  /* --- Wind Turbine --- */
+  const wtX = (W * 0.15 - scroll * 0.25) % (W + 400);
+  if (wtX > -100 && wtX < W + 100) {
+    ctx.save();
+    ctx.translate(wtX, G - 60*S);
+    ctx.scale(S, S);
+    // Tower
+    ctx.fillStyle = '#e2e8f0';
+    ctx.beginPath();
+    ctx.moveTo(-3, 0); ctx.lineTo(-1.5, -120); ctx.lineTo(1.5, -120); ctx.lineTo(3, 0);
+    ctx.closePath();
+    ctx.fill();
+    // Hub
+    ctx.fillStyle = '#cbd5e1';
+    ctx.beginPath(); ctx.arc(0, -120, 4, 0, Math.PI*2); ctx.fill();
+    // Blades
+    const bladeAng = scroll * 0.005;
+    ctx.strokeStyle = '#e2e8f0';
+    ctx.lineWidth = 3;
+    ctx.lineCap = 'round';
+    for(let i=0;i<3;i++){
+      const a = bladeAng + i * (Math.PI*2/3);
+      ctx.beginPath();
+      ctx.moveTo(0, -120);
+      ctx.lineTo(Math.cos(a)*45, -120 + Math.sin(a)*45);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  /* --- Power Lines --- */
+  const plOffset = scroll * 0.35;
+  ctx.strokeStyle = '#4a4a5a';
+  ctx.lineWidth = 2;
+  for(let i=0;i<3;i++){
+    const px = (i * 400 - plOffset) % (W + 800);
+    if (px < -200 || px > W + 200) continue;
+    // Pole
+    ctx.beginPath();
+    ctx.moveTo(px, G - 40*S);
+    ctx.lineTo(px, G - 140*S);
+    ctx.stroke();
+    // Crossbar
+    ctx.beginPath();
+    ctx.moveTo(px - 25*S, G - 130*S);
+    ctx.lineTo(px + 25*S, G - 130*S);
+    ctx.stroke();
+  }
+  // Wires
+  ctx.strokeStyle = 'rgba(74,74,90,0.6)';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for(let i=0;i<4;i++){
+    const px1 = (i * 400 - plOffset) % (W + 800);
+    const px2 = ((i+1) * 400 - plOffset) % (W + 800);
+    if (px1 < -200 || px1 > W + 200) continue;
+    ctx.moveTo(px1 - 25*S, G - 130*S);
+    ctx.quadraticCurveTo(lerp(px1, px2, 0.5), G - 115*S, px2 - 25*S, G - 130*S);
+    ctx.moveTo(px1 + 25*S, G - 130*S);
+    ctx.quadraticCurveTo(lerp(px1, px2, 0.5), G - 115*S, px2 + 25*S, G - 130*S);
+  }
+  ctx.stroke();
+
+  /* --- Road --- */
+  const roadTop = G;
+  ctx.fillStyle = '#36393f';
+  ctx.fillRect(0, roadTop, W, H - roadTop + 2);
+
+  // Road top edge
+  ctx.fillStyle = '#4a4d55';
+  ctx.fillRect(0, roadTop - 2*S, W, 2.4*S);
+
+  // Road dashes
+  ctx.strokeStyle = '#f8fafc';
+  ctx.lineWidth = 3*S;
+  ctx.setLineDash([40*S, 60*S]);
+  ctx.beginPath();
+  const dashOffset = (scroll * 0.5) % (100*S);
+  for(let i=0;i<roadDashes.length;i++){
+    const dx = roadDashes[i].x - dashOffset;
+    if (dx > -100 && dx < W + 100) {
+      ctx.moveTo(dx, roadTop + (H - roadTop)*0.45);
+      ctx.lineTo(dx + 30*S, roadTop + (H - roadTop)*0.45);
+    }
+  }
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  /* --- Roadside Grass --- */
+  const grassOffset = scroll * 0.6;
+  ctx.strokeStyle = '#4a7a4a';
+  ctx.lineWidth = 2.5;
+  ctx.lineCap = 'round';
+  for(let i=0;i<grass.length;i++){
+    const g = grass[i];
+    let x = (g.x - grassOffset) % 2600;
+    if (x < 0) x += 2600;
+    if (x > W + 40) continue;
+    const y = G - 4*S;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.quadraticCurveTo(x + 1, y - g.h*S*0.7, x + g.w*S*0.9, y - g.h*S);
+    ctx.stroke();
+  }
+
+  /* --- Yellow Road Sign --- */
+  const signOffset = (scroll * 0.6) % (W + 600);
+  const signX = W - signOffset;
+  if (signX > -100 && signX < W + 100) {
+    ctx.save();
+    ctx.translate(signX, G - 20*S);
+    ctx.scale(S, S);
+    // Post
+    ctx.fillStyle = '#64748b';
+    ctx.fillRect(-2, -30, 4, 30);
+    // Sign board
+    ctx.fillStyle = '#eab308';
+    ctx.fillRect(-25, -60, 50, 25);
+    ctx.strokeStyle = '#1e293b';
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(-25, -60, 50, 25);
+    // Arrow
+    ctx.fillStyle = '#1e293b';
+    ctx.beginPath();
+    ctx.moveTo(-10, -48);
+    ctx.lineTo(10, -48);
+    ctx.lineTo(10, -55);
+    ctx.lineTo(18, -47.5);
+    ctx.lineTo(10, -40);
+    ctx.lineTo(10, -47);
+    ctx.lineTo(-10, -47);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  /* --- Bird --- */
+  const birdOffset = (scroll * 0.15) % (W + 400);
+  const birdX = W - birdOffset;
+  if (birdX > -50 && birdX < W + 50) {
+    ctx.strokeStyle = '#f8fafc';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    const by = horizonY - 120*S;
+    ctx.moveTo(birdX - 8, by);
+    ctx.quadraticCurveTo(birdX, by - 6, birdX, by);
+    ctx.quadraticCurveTo(birdX, by - 6, birdX + 8, by);
+    ctx.stroke();
+  }
+
+  /* --- The Cyclist --- */
+  drawRider();
+
+  /* --- Vignette --- */
+  const vg = ctx.createRadialGradient(W*0.5, H*0.5, Math.min(W,H)*0.3,
+                                      W*0.5, H*0.5,  Math.max(W,H)*0.8);
+  vg.addColorStop(0, 'rgba(0,0,0,0)');
+  vg.addColorStop(1, 'rgba(20,10,30,0.45)');
+  ctx.fillStyle = vg;
+  ctx.fillRect(0,0,W,H);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   ANIMATION LOOP
+   ══════════════════════════════════════════════════════════════ */
+function frame(now){
+  if (!lastTime) lastTime = now;
+  let dt = (now - lastTime) / 1000;
+  lastTime = now;
+  if (dt > 0.05) dt = 0.05;
+  if (dt < 0)    dt = 0;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(frame);
+}
+
+/* ══════════════════════════════════════════════════════════════
+   INIT
+   ══════════════════════════════════════════════════════════════ */
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 120));
+
+resize();
+requestAnimationFrame(frame);
+
+})();
+</script>
+</body>
+</html>
