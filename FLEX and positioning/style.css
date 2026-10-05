@@ -10,11 +10,24 @@ div{
 }
 
 .item-1{
+
     background-color: lightblue;
-    position: relative;
-    left: 50px;
+    position: fixed;
+    left: 590px;
     top: 50px;
+    border-radius: 50%
+}
 
 .item-2{
     background-color: lightgreen;
+    border-radius: 50%;
+}
+.item-3{
+    background-color: lightpink;
+    border-decoration: dotted;
+    border-radius: 50%;
+}
+
+body{
+    background-color: black;
 }
